@@ -285,7 +285,7 @@ class AutoScrollService : AccessibilityService() {
     private fun createNotificationChannel() {
         val channel = NotificationChannel(
             CHANNEL_ID,
-            "Auto Scroll Status",
+            "NextShort Status",
             NotificationManager.IMPORTANCE_LOW
         ).apply {
             description = "Menampilkan status auto scroll"

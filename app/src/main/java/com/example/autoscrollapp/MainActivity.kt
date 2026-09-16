@@ -26,7 +26,7 @@ class MainActivity : AppCompatActivity() {
 
         // Title
         layout.addView(TextView(this).apply {
-            text = "🎬 Auto Scroll\nYouTube Shorts"
+            text = "⏭️ NextShort"
             textSize = 28f
             gravity = Gravity.CENTER
             setTypeface(null, Typeface.BOLD)
@@ -73,7 +73,7 @@ class MainActivity : AppCompatActivity() {
         layout.addView(TextView(this).apply {
             text = """1️⃣ Tekan tombol di atas untuk membuka Pengaturan Aksesibilitas
 
-2️⃣ Cari "Auto Scroll App" → Nyalakan toggle
+2️⃣ Cari "NextShort" → Nyalakan toggle
 
 3️⃣ Buka YouTube → Masuk ke Shorts
 
