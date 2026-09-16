@@ -75,24 +75,20 @@ class MainActivity : AppCompatActivity() {
 
         // Cara pakai
         layout.addView(TextView(this).apply {
-            text = "📖 Cara Pakai"
+            text = "📖 Cara Pakai (Baru!)"
             textSize = 20f
             setTypeface(null, Typeface.BOLD)
             setPadding(0, 40, 0, 20)
         })
 
         layout.addView(TextView(this).apply {
-            text = """1️⃣ Nyalakan service di Pengaturan Aksesibilitas
-   → Cari "NextShort" → Nyalakan toggle
+            text = """1️⃣ Nyalakan service di Pengaturan Aksesibilitas. Setelah nyala, Anda akan melihat tombol mengambang di layar Anda.
 
-2️⃣ Buka YouTube → Klik tab "Shorts" (bukan Home!)
+2️⃣ Buka YouTube Shorts. Anda bisa menggeser tombol mengambang tersebut agar tidak menutupi video.
 
-3️⃣ Lihat notifikasi NextShort di status bar:
-   • "SHORTS ✅" = Halaman Shorts terdeteksi
-   • "Progress: XX%" = Sedang memantau video
-   • "Auto Scroll! ⬆️" = Pindah ke video baru
+3️⃣ Tombol Hijau (▶): Tekan untuk memulai deteksi otomatis. Jika deteksi gagal/lama, Anda bisa gunakan...
 
-4️⃣ Gunakan tombol ⏸/▶ di notifikasi untuk Jeda/Lanjut
+4️⃣ Tombol Biru (⏭): Tekan untuk memaksa SCROLL/SKIP secara manual kapan saja! Ini mempermudah Anda jika deteksi otomatis sedang tersendat.
 
 5️⃣ Tidur dengan tenang 😴"""
             textSize = 15f
@@ -108,9 +104,7 @@ class MainActivity : AppCompatActivity() {
         })
 
         layout.addView(TextView(this).apply {
-            text = """NextShort mendeteksi progress bar video YouTube Shorts. Ketika video selesai (looping), NextShort otomatis scroll ke video berikutnya.
-
-App ini gratis, tanpa iklan, tanpa langganan, dan tidak mengumpulkan data apapun. Privasi Anda 100% terjaga."""
+            text = """NextShort mendeteksi progress bar video YouTube Shorts. Ketika video selesai (looping), NextShort otomatis scroll ke video berikutnya. Dilengkapi kontrol manual untuk kenyamanan ekstra."""
             textSize = 14f
             setTextColor(Color.GRAY)
             setPadding(0, 0, 0, 40)

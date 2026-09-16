@@ -4,18 +4,23 @@ import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.GestureDescription
 import android.app.NotificationChannel
 import android.app.NotificationManager
-import android.app.PendingIntent
-import android.content.BroadcastReceiver
 import android.content.Context
-import android.content.Intent
-import android.content.IntentFilter
+import android.graphics.Color
 import android.graphics.Path
-import android.os.Build
+import android.graphics.PixelFormat
+import android.graphics.Typeface
+import android.graphics.drawable.GradientDrawable
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
+import android.view.Gravity
+import android.view.MotionEvent
+import android.view.View
+import android.view.WindowManager
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
+import android.widget.LinearLayout
+import android.widget.TextView
 import androidx.core.app.NotificationCompat
 
 class AutoScrollService : AccessibilityService() {
@@ -24,231 +29,271 @@ class AutoScrollService : AccessibilityService() {
         private const val TAG = "NextShort"
         private const val CHANNEL_ID = "nextshort_channel"
         private const val NOTIFICATION_ID = 1001
-        const val ACTION_TOGGLE = "com.example.autoscrollapp.TOGGLE"
-
-        var isEnabled = true  // User bisa toggle via notifikasi
     }
 
     private val handler = Handler(Looper.getMainLooper())
-    private var isYouTubeActive = false
+    private var windowManager: WindowManager? = null
+    private var overlayView: View? = null
     private var isScrolling = false
+    private var isMonitoring = false   // User sudah klik "Mulai"
     private var lastProgressPercent = -1f
     private var progressStableCount = 0
     private var lastScrollTime = 0L
-    private var debugInfo = ""
 
-    // Receiver untuk tombol Play/Stop di notifikasi
-    private val toggleReceiver = object : BroadcastReceiver() {
-        override fun onReceive(context: Context?, intent: Intent?) {
-            if (intent?.action == ACTION_TOGGLE) {
-                isEnabled = !isEnabled
-                if (isEnabled) {
-                    showNotification("▶️ NextShort AKTIF", "Menunggu YouTube Shorts...")
+    // Untuk draggable overlay
+    private var initialX = 0
+    private var initialY = 0
+    private var initialTouchX = 0f
+    private var initialTouchY = 0f
+
+    // Auto-detection polling
+    private val checkRunnable = object : Runnable {
+        override fun run() {
+            if (isMonitoring) {
+                tryAutoDetect()
+                handler.postDelayed(this, 1000)
+            }
+        }
+    }
+
+    // ==================== SERVICE LIFECYCLE ====================
+    override fun onServiceConnected() {
+        super.onServiceConnected()
+        createNotificationChannel()
+        showNotification("NextShort Siap ✅", "Tombol mengambang sudah tampil di layar")
+        createFloatingOverlay()
+        Log.d(TAG, "Service connected, overlay created")
+    }
+
+    override fun onAccessibilityEvent(event: AccessibilityEvent?) {
+        // Kita tidak lagi bergantung pada event untuk deteksi
+        // Semua dikontrol via floating button
+    }
+
+    override fun onInterrupt() {
+        isMonitoring = false
+        handler.removeCallbacks(checkRunnable)
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        removeFloatingOverlay()
+        isMonitoring = false
+        handler.removeCallbacks(checkRunnable)
+        (getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager).cancel(NOTIFICATION_ID)
+    }
+
+    // ==================== FLOATING OVERLAY ====================
+    private fun createFloatingOverlay() {
+        windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
+
+        val container = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER
+            setPadding(8, 8, 8, 8)
+            background = GradientDrawable().apply {
+                setColor(Color.parseColor("#E0222222"))
+                cornerRadius = 30f
+            }
+        }
+
+        // Status text (kecil)
+        val statusText = TextView(this).apply {
+            id = View.generateViewId()
+            text = "NextShort"
+            textSize = 10f
+            setTextColor(Color.WHITE)
+            gravity = Gravity.CENTER
+            tag = "status"
+        }
+
+        // Tombol MULAI / STOP
+        val toggleBtn = makeOverlayButton("▶", "#4CAF50").apply {
+            tag = "toggle"
+            setOnClickListener {
+                isMonitoring = !isMonitoring
+                if (isMonitoring) {
+                    (this as TextView).text = "⏸"
+                    this.background = makeButtonBg("#FF5722")
+                    statusText.text = "Aktif"
+                    statusText.setTextColor(Color.parseColor("#4CAF50"))
+                    showNotification("▶️ Monitoring AKTIF", "Mencoba deteksi otomatis + manual skip tersedia")
+                    handler.removeCallbacks(checkRunnable)
+                    handler.postDelayed(checkRunnable, 500)
                 } else {
-                    showNotification("⏸️ NextShort DIJEDA", "Tekan Play untuk melanjutkan")
+                    (this as TextView).text = "▶"
+                    this.background = makeButtonBg("#4CAF50")
+                    statusText.text = "NextShort"
+                    statusText.setTextColor(Color.WHITE)
+                    showNotification("⏸ Monitoring DIJEDA", "Tekan ▶ untuk melanjutkan")
                     handler.removeCallbacks(checkRunnable)
                 }
             }
         }
+
+        // Tombol SKIP (scroll ke video berikutnya)
+        val skipBtn = makeOverlayButton("⏭", "#2196F3").apply {
+            setOnClickListener {
+                performScroll()
+            }
+        }
+
+        container.addView(statusText)
+
+        val btnRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+            setPadding(4, 4, 4, 4)
+        }
+        btnRow.addView(toggleBtn, LinearLayout.LayoutParams(120, 120).apply { setMargins(4, 4, 4, 4) })
+        btnRow.addView(skipBtn, LinearLayout.LayoutParams(120, 120).apply { setMargins(4, 4, 4, 4) })
+        container.addView(btnRow)
+
+        val params = WindowManager.LayoutParams(
+            WindowManager.LayoutParams.WRAP_CONTENT,
+            WindowManager.LayoutParams.WRAP_CONTENT,
+            WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+            PixelFormat.TRANSLUCENT
+        ).apply {
+            gravity = Gravity.TOP or Gravity.END
+            x = 20
+            y = 300
+        }
+
+        // Draggable
+        container.setOnTouchListener(createDragListener(params))
+
+        windowManager?.addView(container, params)
+        overlayView = container
     }
 
-    private val checkRunnable = object : Runnable {
-        override fun run() {
-            if (isYouTubeActive && isEnabled) {
-                inspectScreen()
-                handler.postDelayed(this, 800)
+    private fun makeOverlayButton(label: String, bgColor: String): TextView {
+        return TextView(this).apply {
+            text = label
+            textSize = 28f
+            gravity = Gravity.CENTER
+            setTextColor(Color.WHITE)
+            setTypeface(null, Typeface.BOLD)
+            background = makeButtonBg(bgColor)
+        }
+    }
+
+    private fun makeButtonBg(color: String): GradientDrawable {
+        return GradientDrawable().apply {
+            setColor(Color.parseColor(color))
+            cornerRadius = 60f
+        }
+    }
+
+    private fun createDragListener(params: WindowManager.LayoutParams): View.OnTouchListener {
+        return View.OnTouchListener { _, event ->
+            when (event.action) {
+                MotionEvent.ACTION_DOWN -> {
+                    initialX = params.x
+                    initialY = params.y
+                    initialTouchX = event.rawX
+                    initialTouchY = event.rawY
+                    false // Jangan consume agar onClick tetap jalan
+                }
+                MotionEvent.ACTION_MOVE -> {
+                    val dx = (initialTouchX - event.rawX).toInt()
+                    val dy = (event.rawY - initialTouchY).toInt()
+                    params.x = initialX + dx
+                    params.y = initialY + dy
+                    windowManager?.updateViewLayout(overlayView, params)
+                    // Consume hanya jika sudah geser cukup jauh
+                    val moved = Math.abs(event.rawX - initialTouchX) > 20 || Math.abs(event.rawY - initialTouchY) > 20
+                    moved
+                }
+                else -> false
             }
         }
     }
 
-    override fun onServiceConnected() {
-        super.onServiceConnected()
-        createNotificationChannel()
-        showNotification("▶️ NextShort AKTIF", "Buka YouTube Shorts untuk mulai")
-
-        val filter = IntentFilter(ACTION_TOGGLE)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            registerReceiver(toggleReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
-        } else {
-            registerReceiver(toggleReceiver, filter)
+    private fun removeFloatingOverlay() {
+        overlayView?.let {
+            try { windowManager?.removeView(it) } catch (_: Exception) {}
         }
-
-        Log.d(TAG, "Service connected!")
+        overlayView = null
     }
 
-    override fun onAccessibilityEvent(event: AccessibilityEvent?) {
-        event ?: return
-        if (!isEnabled) return
+    // ==================== AUTO DETECTION (Background) ====================
+    private fun tryAutoDetect() {
+        val root = rootInActiveWindow ?: return
 
-        val pkg = event.packageName?.toString() ?: return
-
-        if (pkg == "com.google.android.youtube") {
-            if (!isYouTubeActive) {
-                isYouTubeActive = true
-                lastProgressPercent = -1f
-                progressStableCount = 0
-                showNotification("▶️ YouTube Terbuka", "Mencari video Shorts...")
-                handler.removeCallbacks(checkRunnable)
-                handler.postDelayed(checkRunnable, 500)
-            }
-        } else {
-            if (isYouTubeActive) {
-                isYouTubeActive = false
-                handler.removeCallbacks(checkRunnable)
-                showNotification("▶️ NextShort AKTIF", "YouTube tidak terbuka")
-            }
-        }
-    }
-
-    // ==================== INSPEKSI LAYAR ====================
-    private fun inspectScreen() {
-        if (!isEnabled) return
-
-        val root = rootInActiveWindow
-        if (root == null) {
-            showNotification("⚠️ Tidak bisa membaca layar", "root = null")
-            return
-        }
-
-        // Kumpulkan SEMUA node untuk analisis
+        // Kumpulkan semua node
         val allNodes = mutableListOf<NodeData>()
         collectAllNodes(root, allNodes, 0)
 
-        // ====== STRATEGI 1: Cari node dengan RangeInfo ======
-        val rangeNodes = allNodes.filter { it.rangeInfo != null }
-        if (rangeNodes.isNotEmpty()) {
-            for (rn in rangeNodes) {
-                val range = rn.rangeInfo!!
-                val max = range.max
-                if (max <= 0) continue
+        // Cari node dengan RangeInfo
+        for (nd in allNodes) {
+            val range = nd.rangeInfo ?: continue
+            if (range.max <= 0) continue
 
-                val percent = (range.current / max) * 100f
-                Log.d(TAG, "📊 RangeInfo: ${range.current}/$max = ${percent.toInt()}% [${rn.className}] id=${rn.viewId}")
-                showNotification("▶️ Shorts Diputar", "Progress: ${percent.toInt()}% | ${rn.className}")
+            val percent = (range.current / range.max) * 100f
+            Log.d(TAG, "Progress: ${percent.toInt()}% [${nd.className}] id=${nd.viewId}")
 
-                if (lastProgressPercent >= 80f && percent < 20f) {
-                    Log.d(TAG, "🔄 Loop detected via RangeInfo!")
-                    lastProgressPercent = percent
-                    triggerScroll()
-                    return
-                }
-                if (percent >= 95f) {
-                    progressStableCount++
-                    if (progressStableCount >= 4) {
-                        Log.d(TAG, "⏹ Stuck at end via RangeInfo!")
-                        progressStableCount = 0
-                        triggerScroll()
-                        return
-                    }
-                } else {
-                    progressStableCount = 0
-                }
+            updateStatusText("${percent.toInt()}%")
+            showNotification("▶️ Progress: ${percent.toInt()}%", "Auto-detection aktif | ${nd.viewId}")
+
+            // Deteksi loop
+            if (lastProgressPercent >= 80f && percent < 20f) {
                 lastProgressPercent = percent
+                performScroll()
                 return
             }
+            if (percent >= 95f) {
+                progressStableCount++
+                if (progressStableCount >= 4) {
+                    progressStableCount = 0
+                    performScroll()
+                    return
+                }
+            } else {
+                progressStableCount = 0
+            }
+            lastProgressPercent = percent
+            return
         }
 
-        // ====== STRATEGI 2: Cari viewId mengandung kata kunci progress ======
-        val progressKeywords = listOf("progress", "seek", "time_bar", "scrubber", "slider", "playback")
-        val progressIdNodes = allNodes.filter { node ->
-            val id = node.viewId.lowercase()
-            progressKeywords.any { id.contains(it) }
-        }
-        if (progressIdNodes.isNotEmpty()) {
-            val info = progressIdNodes.joinToString(", ") { "${it.viewId}[${it.className}]" }
-            Log.d(TAG, "🔍 Found progress-related IDs: $info")
-            showNotification("🔍 Progress ID ditemukan", info.take(80))
+        // Cari teks waktu
+        val timePattern = Regex("\\d+:\\d{2}")
+        for (nd in allNodes) {
+            val combined = "${nd.text} ${nd.contentDesc}"
+            val matches = timePattern.findAll(combined).toList()
+            if (matches.size >= 2) {
+                val current = parseTime(matches[0].value)
+                val total = parseTime(matches[1].value)
+                if (total > 0) {
+                    val percent = (current.toFloat() / total.toFloat()) * 100f
+                    updateStatusText("⏱${current}s")
+                    showNotification("⏱ $current / $total detik", "Time detection aktif")
 
-            // Cek rangeInfo pada node ini
-            for (pn in progressIdNodes) {
-                if (pn.rangeInfo != null) {
-                    handleRangeDetection(pn.rangeInfo!!, pn.className)
+                    if (lastProgressPercent >= 80f && percent < 20f) {
+                        lastProgressPercent = percent
+                        performScroll()
+                        return
+                    }
+                    lastProgressPercent = percent
                     return
                 }
             }
         }
 
-        // ====== STRATEGI 3: Cari teks waktu (0:15, 1:30, dll) ======
-        val timePattern = Regex("\\d+:\\d{2}")
-        val timeNodes = allNodes.filter { node ->
-            val combined = "${node.text} ${node.contentDesc}"
-            timePattern.containsMatchIn(combined)
-        }
-        if (timeNodes.isNotEmpty()) {
-            val timeTexts = timeNodes.map { "${it.text}${it.contentDesc}".trim() }
-            Log.d(TAG, "⏱ Found time texts: $timeTexts")
-            showNotification("⏱️ Waktu terdeteksi", timeTexts.joinToString(" | ").take(80))
+        // Tidak ada yang terdeteksi — tetap coba, user bisa manual skip
+        updateStatusText("Aktif")
+    }
 
-            // Coba parse pasangan waktu (current / total)
-            for (tn in timeNodes) {
-                val combined = "${tn.text} ${tn.contentDesc}"
-                val matches = timePattern.findAll(combined).toList()
-                if (matches.size >= 2) {
-                    val current = parseTimeToSeconds(matches[0].value)
-                    val total = parseTimeToSeconds(matches[1].value)
-                    if (total > 0) {
-                        val percent = (current.toFloat() / total.toFloat()) * 100f
-                        showNotification("▶️ Shorts Diputar", "⏱ $current/$total detik (${percent.toInt()}%)")
-
-                        if (lastProgressPercent >= 80f && percent < 20f) {
-                            lastProgressPercent = percent
-                            triggerScroll()
-                            return
-                        }
-                        lastProgressPercent = percent
-                        return
-                    }
-                }
-            }
-        }
-
-        // ====== STRATEGI 4: Deteksi halaman Shorts ======
-        val isShortsPage = detectShortsPage(allNodes)
-
-        // ====== DEBUG: Ringkasan node tree ======
-        val uniqueClasses = allNodes.map { it.className }.distinct().sorted()
-        val totalNodes = allNodes.size
-        val nodesWithText = allNodes.count { it.text.isNotEmpty() }
-        val nodesWithDesc = allNodes.count { it.contentDesc.isNotEmpty() }
-        val nodesWithId = allNodes.count { it.viewId.isNotEmpty() }
-        val nodesWithRange = rangeNodes.size
-
-        val shortStatus = if (isShortsPage) "SHORTS ✅" else "BUKAN SHORTS"
-        debugInfo = "$shortStatus | Total:$totalNodes Text:$nodesWithText Desc:$nodesWithDesc Id:$nodesWithId Range:$nodesWithRange"
-
-        showNotification("🔍 $shortStatus | Mencari...", debugInfo)
-
-        // Log beberapa class names untuk debugging
-        Log.d(TAG, "=== Node Tree Summary ===")
-        Log.d(TAG, "Total nodes: $totalNodes")
-        Log.d(TAG, "Classes: ${uniqueClasses.joinToString(", ")}")
-        for (node in allNodes.take(50)) {
-            if (node.viewId.isNotEmpty() || node.text.isNotEmpty() || node.contentDesc.isNotEmpty() || node.rangeInfo != null) {
-                Log.d(TAG, "  [${node.className}] id=${node.viewId} text=\"${node.text}\" desc=\"${node.contentDesc}\" range=${node.rangeInfo}")
+    private fun updateStatusText(text: String) {
+        overlayView?.let { container ->
+            container.findViewWithTag<TextView>("status")?.let {
+                handler.post { it.text = text }
             }
         }
     }
 
-    // ==================== DETEKSI HALAMAN SHORTS ====================
-    private fun detectShortsPage(nodes: List<NodeData>): Boolean {
-        // Shorts page biasanya punya tombol Like, Comment, Share yang tersusun vertikal
-        // dan video fullscreen
-        val shortsIndicators = listOf("like", "dislike", "comment", "share", "subscribe", "remix", "shorts")
-        var matchCount = 0
-        for (node in nodes) {
-            val combined = "${node.text} ${node.contentDesc} ${node.viewId}".lowercase()
-            for (indicator in shortsIndicators) {
-                if (combined.contains(indicator)) {
-                    matchCount++
-                    break
-                }
-            }
-        }
-        // Jika ada 3+ indikator, kemungkinan besar ini halaman Shorts
-        return matchCount >= 3
-    }
-
-    // ==================== HELPER: Kumpulkan semua node ====================
+    // ==================== DATA COLLECTION ====================
     data class NodeData(
         val className: String,
         val viewId: String,
@@ -261,82 +306,44 @@ class AutoScrollService : AccessibilityService() {
         list.add(NodeData(
             className = node.className?.toString()?.substringAfterLast('.') ?: "?",
             viewId = node.viewIdResourceName?.substringAfterLast('/') ?: "",
-            text = node.text?.toString()?.take(50) ?: "",
-            contentDesc = node.contentDescription?.toString()?.take(50) ?: "",
+            text = node.text?.toString()?.take(60) ?: "",
+            contentDesc = node.contentDescription?.toString()?.take(60) ?: "",
             rangeInfo = node.rangeInfo
         ))
-
         if (depth < 15) {
             for (i in 0 until node.childCount) {
-                val child = try { node.getChild(i) } catch (e: Exception) { null }
-                if (child != null) {
-                    collectAllNodes(child, list, depth + 1)
-                }
+                val child = try { node.getChild(i) } catch (_: Exception) { null }
+                if (child != null) collectAllNodes(child, list, depth + 1)
             }
         }
     }
 
-    // ==================== HELPER: Handle range detection ====================
-    private fun handleRangeDetection(range: AccessibilityNodeInfo.RangeInfo, className: String) {
-        val max = range.max
-        if (max <= 0) return
-
-        val percent = (range.current / max) * 100f
-        showNotification("▶️ Shorts Diputar", "Progress: ${percent.toInt()}% [$className]")
-
-        if (lastProgressPercent >= 80f && percent < 20f) {
-            lastProgressPercent = percent
-            triggerScroll()
-            return
-        }
-        if (percent >= 95f) {
-            progressStableCount++
-            if (progressStableCount >= 4) {
-                progressStableCount = 0
-                triggerScroll()
-                return
-            }
-        } else {
-            progressStableCount = 0
-        }
-        lastProgressPercent = percent
-    }
-
-    // ==================== HELPER: Parse time ====================
-    private fun parseTimeToSeconds(time: String): Int {
-        val parts = time.split(":")
-        return when (parts.size) {
-            2 -> (parts[0].toIntOrNull() ?: 0) * 60 + (parts[1].toIntOrNull() ?: 0)
-            3 -> (parts[0].toIntOrNull() ?: 0) * 3600 + (parts[1].toIntOrNull() ?: 0) * 60 + (parts[2].toIntOrNull() ?: 0)
+    private fun parseTime(t: String): Int {
+        val p = t.split(":")
+        return when (p.size) {
+            2 -> (p[0].toIntOrNull() ?: 0) * 60 + (p[1].toIntOrNull() ?: 0)
             else -> 0
         }
     }
 
     // ==================== SCROLL ====================
-    private fun triggerScroll() {
-        val now = System.currentTimeMillis()
-        if (now - lastScrollTime < 3000) return
-        lastScrollTime = now
-        performScroll()
-    }
-
     private fun performScroll() {
         if (isScrolling) return
+        val now = System.currentTimeMillis()
+        if (now - lastScrollTime < 2000) return
+        lastScrollTime = now
         isScrolling = true
 
-        showNotification("⬆️ Auto Scroll!", "Pindah ke video berikutnya...")
-        Log.d(TAG, "🚀 Scrolling!")
+        showNotification("⬆️ Scroll!", "Pindah ke video berikutnya...")
+        updateStatusText("⬆️")
 
         val dm = resources.displayMetrics
-        val screenH = dm.heightPixels
-        val screenW = dm.widthPixels
-
         val path = Path()
-        path.moveTo(screenW / 2f, screenH * 0.75f)
-        path.lineTo(screenW / 2f, screenH * 0.25f)
+        path.moveTo(dm.widthPixels / 2f, dm.heightPixels * 0.75f)
+        path.lineTo(dm.widthPixels / 2f, dm.heightPixels * 0.25f)
 
         val gesture = GestureDescription.Builder()
-            .addStroke(GestureDescription.StrokeDescription(path, 0, 400))
+            .addStroke(GestureDescription.StrokeDescription(path, 0, 350))
             .build()
 
         dispatchGesture(gesture, object : GestureResultCallback() {
@@ -346,37 +353,28 @@ class AutoScrollService : AccessibilityService() {
                     isScrolling = false
                     lastProgressPercent = -1f
                     progressStableCount = 0
-                    showNotification("▶️ Shorts Diputar", "Menunggu video selesai...")
-                }, 2000)
+                    updateStatusText("Aktif")
+                    showNotification("▶️ Monitoring AKTIF", "Menunggu video selesai...")
+                }, 1500)
             }
             override fun onCancelled(gestureDescription: GestureDescription?) {
                 super.onCancelled(gestureDescription)
                 isScrolling = false
+                updateStatusText("Aktif")
             }
         }, null)
     }
 
     // ==================== NOTIFICATION ====================
     private fun createNotificationChannel() {
-        val channel = NotificationChannel(CHANNEL_ID, "NextShort Status", NotificationManager.IMPORTANCE_LOW).apply {
-            description = "Status auto scroll NextShort"
+        val channel = NotificationChannel(CHANNEL_ID, "NextShort", NotificationManager.IMPORTANCE_LOW).apply {
+            description = "Status NextShort"
             setShowBadge(false)
         }
         (getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager).createNotificationChannel(channel)
     }
 
     private fun showNotification(title: String, text: String) {
-        val toggleIntent = Intent(ACTION_TOGGLE).apply {
-            setPackage(packageName)
-        }
-        val togglePendingIntent = PendingIntent.getBroadcast(
-            this, 0, toggleIntent,
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-        )
-
-        val actionIcon = if (isEnabled) android.R.drawable.ic_media_pause else android.R.drawable.ic_media_play
-        val actionText = if (isEnabled) "⏸ Jeda" else "▶ Lanjut"
-
         val notification = NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(android.R.drawable.ic_media_play)
             .setContentTitle(title)
@@ -384,23 +382,7 @@ class AutoScrollService : AccessibilityService() {
             .setOngoing(true)
             .setSilent(true)
             .setPriority(NotificationCompat.PRIORITY_LOW)
-            .addAction(actionIcon, actionText, togglePendingIntent)
             .build()
-
         (getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager).notify(NOTIFICATION_ID, notification)
-    }
-
-    // ==================== LIFECYCLE ====================
-    override fun onInterrupt() {
-        isYouTubeActive = false
-        handler.removeCallbacks(checkRunnable)
-    }
-
-    override fun onDestroy() {
-        super.onDestroy()
-        try { unregisterReceiver(toggleReceiver) } catch (_: Exception) {}
-        isYouTubeActive = false
-        handler.removeCallbacks(checkRunnable)
-        (getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager).cancel(NOTIFICATION_ID)
     }
 }
