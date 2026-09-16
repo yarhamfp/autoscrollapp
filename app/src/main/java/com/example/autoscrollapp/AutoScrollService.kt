@@ -8,6 +8,7 @@ import android.content.Context
 import android.graphics.Color
 import android.graphics.Path
 import android.graphics.PixelFormat
+import android.graphics.Rect
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.os.Handler
@@ -35,18 +36,16 @@ class AutoScrollService : AccessibilityService() {
     private var windowManager: WindowManager? = null
     private var overlayView: View? = null
     private var isScrolling = false
-    private var isMonitoring = false   // User sudah klik "Mulai"
+    private var isMonitoring = false   
     private var lastProgressPercent = -1f
     private var progressStableCount = 0
     private var lastScrollTime = 0L
 
-    // Untuk draggable overlay
     private var initialX = 0
     private var initialY = 0
     private var initialTouchX = 0f
     private var initialTouchY = 0f
 
-    // Auto-detection polling
     private val checkRunnable = object : Runnable {
         override fun run() {
             if (isMonitoring) {
@@ -56,18 +55,14 @@ class AutoScrollService : AccessibilityService() {
         }
     }
 
-    // ==================== SERVICE LIFECYCLE ====================
     override fun onServiceConnected() {
         super.onServiceConnected()
         createNotificationChannel()
         showNotification("NextShort Siap ✅", "Tombol mengambang sudah tampil di layar")
         createFloatingOverlay()
-        Log.d(TAG, "Service connected, overlay created")
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
-        // Kita tidak lagi bergantung pada event untuk deteksi
-        // Semua dikontrol via floating button
     }
 
     override fun onInterrupt() {
@@ -97,7 +92,6 @@ class AutoScrollService : AccessibilityService() {
             }
         }
 
-        // Status text (kecil)
         val statusText = TextView(this).apply {
             id = View.generateViewId()
             text = "NextShort"
@@ -107,7 +101,6 @@ class AutoScrollService : AccessibilityService() {
             tag = "status"
         }
 
-        // Tombol MULAI / STOP
         val toggleBtn = makeOverlayButton("▶", "#4CAF50").apply {
             tag = "toggle"
             setOnClickListener {
@@ -117,7 +110,7 @@ class AutoScrollService : AccessibilityService() {
                     this.background = makeButtonBg("#FF5722")
                     statusText.text = "Aktif"
                     statusText.setTextColor(Color.parseColor("#4CAF50"))
-                    showNotification("▶️ Monitoring AKTIF", "Mencoba deteksi otomatis + manual skip tersedia")
+                    showNotification("▶️ Monitoring AKTIF", "Mencoba deteksi garis merah...")
                     handler.removeCallbacks(checkRunnable)
                     handler.postDelayed(checkRunnable, 500)
                 } else {
@@ -131,7 +124,6 @@ class AutoScrollService : AccessibilityService() {
             }
         }
 
-        // Tombol SKIP (scroll ke video berikutnya)
         val skipBtn = makeOverlayButton("⏭", "#2196F3").apply {
             setOnClickListener {
                 performScroll()
@@ -161,9 +153,7 @@ class AutoScrollService : AccessibilityService() {
             y = 300
         }
 
-        // Draggable
         container.setOnTouchListener(createDragListener(params))
-
         windowManager?.addView(container, params)
         overlayView = container
     }
@@ -194,7 +184,7 @@ class AutoScrollService : AccessibilityService() {
                     initialY = params.y
                     initialTouchX = event.rawX
                     initialTouchY = event.rawY
-                    false // Jangan consume agar onClick tetap jalan
+                    false 
                 }
                 MotionEvent.ACTION_MOVE -> {
                     val dx = (initialTouchX - event.rawX).toInt()
@@ -202,9 +192,7 @@ class AutoScrollService : AccessibilityService() {
                     params.x = initialX + dx
                     params.y = initialY + dy
                     windowManager?.updateViewLayout(overlayView, params)
-                    // Consume hanya jika sudah geser cukup jauh
-                    val moved = Math.abs(event.rawX - initialTouchX) > 20 || Math.abs(event.rawY - initialTouchY) > 20
-                    moved
+                    Math.abs(event.rawX - initialTouchX) > 20 || Math.abs(event.rawY - initialTouchY) > 20
                 }
                 else -> false
             }
@@ -218,71 +206,49 @@ class AutoScrollService : AccessibilityService() {
         overlayView = null
     }
 
-    // ==================== AUTO DETECTION (Background) ====================
+    // ==================== AUTO DETECTION (Lebar Garis Merah) ====================
     private fun tryAutoDetect() {
         val root = rootInActiveWindow ?: return
 
-        // Kumpulkan semua node
         val allNodes = mutableListOf<NodeData>()
         collectAllNodes(root, allNodes, 0)
 
-        // Cari node dengan RangeInfo
-        for (nd in allNodes) {
-            val range = nd.rangeInfo ?: continue
-            if (range.max <= 0) continue
+        val dm = resources.displayMetrics
+        val screenW = dm.widthPixels
+        val screenH = dm.heightPixels
 
-            val percent = (range.current / range.max) * 100f
-            Log.d(TAG, "Progress: ${percent.toInt()}% [${nd.className}] id=${nd.viewId}")
-
-            updateStatusText("${percent.toInt()}%")
-            showNotification("▶️ Progress: ${percent.toInt()}%", "Auto-detection aktif | ${nd.viewId}")
-
-            // Deteksi loop
-            if (lastProgressPercent >= 80f && percent < 20f) {
-                lastProgressPercent = percent
-                performScroll()
-                return
-            }
-            if (percent >= 95f) {
-                progressStableCount++
-                if (progressStableCount >= 4) {
-                    progressStableCount = 0
-                    performScroll()
-                    return
-                }
-            } else {
-                progressStableCount = 0
-            }
-            lastProgressPercent = percent
-            return
+        // STRATEGI KHUSUS: Cari View yang sangat tipis (tinggi < 30px) di layar bagian bawah (>70% tinggi layar)
+        // Ini adalah cara paling ampuh mendeteksi GARIS MERAH YouTube Shorts
+        val thinViews = allNodes.filter { 
+            it.height > 0 && it.height < 30 && it.bottomY > (screenH * 0.7)
         }
 
-        // Cari teks waktu
-        val timePattern = Regex("\\d+:\\d{2}")
-        for (nd in allNodes) {
-            val combined = "${nd.text} ${nd.contentDesc}"
-            val matches = timePattern.findAll(combined).toList()
-            if (matches.size >= 2) {
-                val current = parseTime(matches[0].value)
-                val total = parseTime(matches[1].value)
-                if (total > 0) {
-                    val percent = (current.toFloat() / total.toFloat()) * 100f
-                    updateStatusText("⏱${current}s")
-                    showNotification("⏱ $current / $total detik", "Time detection aktif")
-
+        if (thinViews.isNotEmpty()) {
+            for (v in thinViews) {
+                // Konversi lebar view menjadi persen layar
+                val percent = (v.width.toFloat() / screenW.toFloat()) * 100f
+                if (percent in 1f..100f) {
+                    
+                    // Deteksi loop: Jika lebarnya tadi >80% dari layar, lalu anjlok jadi <20%, artinya kembali ke awal!
                     if (lastProgressPercent >= 80f && percent < 20f) {
+                        Log.d(TAG, "🔄 Garis Merah Reset! (${lastProgressPercent.toInt()}% -> ${percent.toInt()}%)")
                         lastProgressPercent = percent
+                        showNotification("▶️ Garis Merah Reset", "Mendeteksi loop video!")
                         performScroll()
                         return
                     }
-                    lastProgressPercent = percent
-                    return
+                    
+                    if (percent > lastProgressPercent || percent < lastProgressPercent) {
+                        lastProgressPercent = percent
+                        updateStatusText("📏 ${percent.toInt()}%")
+                        showNotification("▶️ Membaca Garis Merah", "Lebar: ${percent.toInt()}%")
+                    }
                 }
             }
+            return
         }
 
-        // Tidak ada yang terdeteksi — tetap coba, user bisa manual skip
-        updateStatusText("Aktif")
+        updateStatusText("Mencari...")
     }
 
     private fun updateStatusText(text: String) {
@@ -293,21 +259,25 @@ class AutoScrollService : AccessibilityService() {
         }
     }
 
-    // ==================== DATA COLLECTION ====================
     data class NodeData(
         val className: String,
         val viewId: String,
-        val text: String,
-        val contentDesc: String,
+        val width: Int,
+        val height: Int,
+        val bottomY: Int,
         val rangeInfo: AccessibilityNodeInfo.RangeInfo?
     )
 
     private fun collectAllNodes(node: AccessibilityNodeInfo, list: MutableList<NodeData>, depth: Int) {
+        val rect = Rect()
+        node.getBoundsInScreen(rect)
+        
         list.add(NodeData(
             className = node.className?.toString()?.substringAfterLast('.') ?: "?",
             viewId = node.viewIdResourceName?.substringAfterLast('/') ?: "",
-            text = node.text?.toString()?.take(60) ?: "",
-            contentDesc = node.contentDescription?.toString()?.take(60) ?: "",
+            width = rect.width(),
+            height = rect.height(),
+            bottomY = rect.bottom,
             rangeInfo = node.rangeInfo
         ))
         if (depth < 15) {
@@ -315,14 +285,6 @@ class AutoScrollService : AccessibilityService() {
                 val child = try { node.getChild(i) } catch (_: Exception) { null }
                 if (child != null) collectAllNodes(child, list, depth + 1)
             }
-        }
-    }
-
-    private fun parseTime(t: String): Int {
-        val p = t.split(":")
-        return when (p.size) {
-            2 -> (p[0].toIntOrNull() ?: 0) * 60 + (p[1].toIntOrNull() ?: 0)
-            else -> 0
         }
     }
 
@@ -354,7 +316,7 @@ class AutoScrollService : AccessibilityService() {
                     lastProgressPercent = -1f
                     progressStableCount = 0
                     updateStatusText("Aktif")
-                    showNotification("▶️ Monitoring AKTIF", "Menunggu video selesai...")
+                    showNotification("▶️ Monitoring AKTIF", "Menunggu garis merah...")
                 }, 1500)
             }
             override fun onCancelled(gestureDescription: GestureDescription?) {
@@ -365,7 +327,6 @@ class AutoScrollService : AccessibilityService() {
         }, null)
     }
 
-    // ==================== NOTIFICATION ====================
     private fun createNotificationChannel() {
         val channel = NotificationChannel(CHANNEL_ID, "NextShort", NotificationManager.IMPORTANCE_LOW).apply {
             description = "Status NextShort"
